@@ -1,0 +1,24 @@
+            - name: Calculate NEP29
+  # You may pin to the exact commit or the version.
+  # uses: mstimberg/github-calc-nep29@3c12c4ed960a8756e9423b6e4831eb86a5c97c99
+  uses: mstimberg/github-calc-nep29@v0.6
+  with:
+    # Include release candidates in max versions? Defaults to false.
+    include-release-candidates: # optional
+    # Include beta releases in max versions? Defaults to false.
+    include-beta-releases: # optional
+    # Deprecate Python releases after how many months? Defaults to 42.
+    deprecate-python-after: # optional, default is 42
+    # Minimum number of minor versions of Python to support? Defaults to 2.
+    min-python-releases: # optional, default is 2
+    # Deprecate numpy releases after how many months? Defaults to 24.
+    deprecate-numpy-after: # optional, default is 24
+    # Minimum number of minor versions of numpy to support? Defaults to 3.
+    min-numpy-releases: # optional, default is 3
+    # Targeted release date in format YYYY-MM-DD. Defaults to the current date.
+    release-date: # optional, default is 
+    # Whether to export environment variables in addition to setting the action output. Defaults to true.
+    export-to-env: # optional, default is true
+    # The GitHub API token
+    token: 
+          
