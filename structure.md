@@ -2,7 +2,7 @@
 
 /src
 ├── core
-│   ├── intuition-core.ts        # Main logic (provided earlier)
+│   ├── intuition-core.ts        # Main logic 
 │   ├── creativity-analyzer.ts   # Concrete scoring implementations
 │   └── knowledge-graph.ts       # GraphDB interactions
 ├── analyzers
