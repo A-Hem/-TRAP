@@ -1,0 +1,365 @@
+ `geneticCompile` using Nim's `stew` library for byte manipulation and `chronos` for async operations, following the patterns shown in the `nim-libp2p` documentation:
+
+```nim
+import stew/byteutils, stew/shims/hashes, chronos, libp2p
+
+proc geneticCompile*(source: string, lang: string): Future[seq[byte]] {.async.} =
+  ## A simplified genetic compilation process that:
+  ## 1. Generates deterministic hash from source
+  ## 2. Creates mock WASM output
+  ## 3. Simulates evolutionary optimization
+  
+  # Create deterministic hash using Nim-stew's hashing utilities
+  let sourceHash = hash("$1|$2" % [lang, source]).toBytes().toHex()
+
+  # Simulate compilation delay (100-500ms)
+  let delay = max(100, hash(sourceHash).int mod 500
+  await sleepAsync(milliseconds(delay))
+
+  # Generate mock WASM output with header
+  var wasmOutput = @[0x00'u8, 0x61, 0x73, 0x6D]  # WASM magic
+  wasmOutput.add(0x01'u8)                         # WASM version
+  
+  # Add source hash as custom section
+  wasmOutput.add(0x00'u8)                         # Custom section
+  wasmOutput.add(byte(sourceHash.len))
+  wasmOutput.add(cast[seq[byte]](sourceHash))
+
+  # Add mock function based on language
+  case lang.toLowerAscii()
+  of "js":
+    wasmOutput.add(@[0x01'u8, 0x00])  # Empty type section
+  of "rust":
+    wasmOutput.add(@[0x01'u8, 0x01, 0x60, 0x00, 0x00])  # Function type
+  else:
+    raise newException(ValueError, "Unsupported language: " & lang)
+
+  return wasmOutput
+
+proc handleCompileRequest(conn: Connection, proto: string) {.async.} =
+  try:
+    let req = await conn.readLp(1024 * 1024)  # Max 1MB source
+    let lang = await conn.readLp(1024)
+    
+    let wasm = await geneticCompile(string.fromBytes(req), string.fromBytes(lang))
+    await conn.writeLp(wasm)
+  
+  except CatchableError as e:
+    await conn.writeLp("ERROR: " & e.msg.toBytes())
+  finally:
+    await conn.close()
+```
+
+Key features using `stew` and `chronos`:
+
+1. **Byte Manipulation**:
+```nim
+# Convert between string and bytes safely
+let payload = "func() {}".toBytes()
+let restored = string.fromBytes(payload)
+
+# Hex encoding/decoding
+let hexEncoded = byteutils.toHex(payload)
+let decoded = byteutils.fromHex(hexEncoded)
+```
+
+2. **Deterministic Hashing**:
+```nim
+proc sourceFingerprint(source: string): string =
+  var hasher = hashes.hash()
+  hasher.update(source)
+  result = $hasher.finish()
+```
+
+3. **Async Rate Limiting**:
+```nim
+var lastCompile = Moment.now()
+proc geneticCompile*(source: string, lang: string): Future[seq[byte]] {.async.} =
+  let elapsed = Moment.now() - lastCompile
+  if elapsed < milliseconds(100):
+    await sleepAsync(milliseconds(100) - elapsed)
+  lastCompile = Moment.now()
+  # ... rest of compilation logic ...
+```
+
+4. **WASM Validation**:
+```nim
+proc validateWasm(wasm: seq[byte]): bool =
+  if wasm.len < 4:
+    return false
+  wasm[0..3] == @[0x00'u8, 0x61, 0x73, 0x6D]  # Check magic number
+```
+
+To use with libp2p:
+
+```nim
+proc setupNode*(node: JITNode) =
+  node.switch.mount:
+    @[new Protocol(
+      codec = "/jit/1.0.0",
+      handler = handleCompileRequest
+    )]
+    Identify.new()
+    Ping.new()
+  
+  node.pubsub.subscribe("wasm-updates"):
+    proc(topic: string, data: seq[byte]) =
+      if validateWasm(data):
+        node.cacheWasm(data)
+```
+
+Example workflow:
+```bash
+# Start node
+nim c -r jit_node.nim --port=3000
+
+# Send request using libp2p-client
+echo -n "function hello() { return 42 }" | libp2p-client \
+  /ip4/127.0.0.1/tcp/3000/p2p/QmPeerId \
+  /jit/1.0.0
+
+# Expected output (hex):
+0061736d 0100...
+```
+
+This implementation demonstrates:
+1. Safe byte handling with `stew/byteutils`
+2. Async/await patterns with `chronos`
+3. Deterministic hashing for caching
+4. Basic WASM structure generation
+5. Integration with libp2p protocols
+6. Rate limiting and validation
+
+The compilation process can be extended with real WASM generation by integrating with a compiler like `binaryen` or `wasmer` while maintaining the same libp2p interface.Here's the Nim implementation of your genetic runtime concept, integrated with `nim-libp2p` and `wasmer` for WebAssembly execution. This implementation includes security sandboxing, capability-based access control, and evolutionary memory management:
+
+```nim
+import wasmer, chronos, stew/byteutils, libp2p, 
+       nimcrypto, tables, options, times
+
+type
+  Capability* {.pure.} = enum
+    Math, IO, Network, Storage
+
+  ExecutionResult* = object
+    output*: string
+    memoryUsed*: int
+    executionTime*: Duration
+    survived*: bool
+
+  JeetRuntime* = ref object of RootObj
+    instances: Table[string, Instance]
+    memoryBudget: int
+    capabilities: set[Capability]
+    gcInterval: Duration
+    executionLog: Table[string, ExecutionResult]
+
+  RuntimeError* = object of CatchableError
+
+const
+  DefaultMemoryPages = 128
+  MaxMemoryPages = 1024
+  Timeout = 5.seconds
+
+proc newJeetRuntime*(capabilities: set[Capability], 
+                    memoryMB: int = 256): JeetRuntime =
+  let pages = min(MaxMemoryPages, memoryMB * 1024 div 65536)
+  result = JeetRuntime(
+    capabilities: capabilities,
+    memoryBudget: pages * 65536,
+    gcInterval: 30.seconds,
+    instances: initTable[string, Instance](),
+    executionLog: initTable[string, ExecutionResult]()
+  )
+
+proc secureImportObject(rt: JeetRuntime): ImportObject =
+  let imports = newImportObject()
+  
+  # Basic safe imports
+  imports.register("env", "abort") do (msg: ptr byte) {.wasm.}:
+    raise newException(RuntimeError, "Abort called: " & $msg)
+  
+  # Capability-gated imports
+  if Capability.Math in rt.capabilities:
+    imports.registerNamespace("math"):
+      "pow" => func(a, b: float64): float64 {.wasm.} = 
+        if b > 100: NaN else: pow(a, b)
+      "sqrt" => sqrt
+  
+  if Capability.IO in rt.capabilities:
+    imports.registerNamespace("io"):
+      "print" => func(msg: cstring) {.wasm.} = 
+        echo "WASM Output: ", msg
+
+  imports
+
+proc execute*(rt: JeetRuntime, wasmBytes: seq[byte], 
+             input: string): Future[string] {.async.} =
+  let module = parseModule(wasmBytes)
+  let instance = newInstance(module, rt.secureImportObject())
+  let instanceHash = $nimcrypto.hash(wasmBytes, SHA256)
+  
+  try:
+    let startTime = getTime()
+    let memory = instance.exports.getMemory("memory")
+    
+    # Write input to memory
+    let inputBytes = input.toBytes()
+    if inputBytes.len > memory.size:
+      raise newException(RuntimeError, "Input exceeds memory")
+    
+    let inputPtr = instance.exports.getFunction("alloc")(inputBytes.len)
+    copyMem(memory.offset(inputPtr), addr inputBytes[0], inputBytes.len
+    
+    # Execute with timeout
+    let mainFunc = instance.exports.getFunction("main")
+    let execution = mainFunc(inputPtr, inputBytes.len)
+    let result = await withTimeout(execution, Timeout)
+    
+    # Read output from memory
+    let outputPtr = result[0]
+    let outputLen = result[1]
+    let output = newString(outputLen)
+    copyMem(addr output[0], memory.offset(outputPtr), outputLen)
+    
+    # Track execution metrics
+    rt.executionLog[instanceHash] = ExecutionResult(
+      output: output,
+      memoryUsed: memory.size,
+      executionTime: getTime() - startTime,
+      survived: true
+    )
+    
+    return output
+    
+  except WasmerError as e:
+    rt.executionLog[instanceHash].survived = false
+    raise newException(RuntimeError, "Execution failed: " & e.msg)
+  
+  finally:
+    instance.cleanup()
+
+proc garbageCollect*(rt: JeetRuntime) =
+  let now = getTime()
+  var totalMemory = 0
+  
+  for hash, instance in rt.instances:
+    let result = rt.executionLog.getOrDefault(hash)
+    let age = now - result.executionTime
+    let fitness = result.memoryUsed.float * age.inSeconds.float
+    
+    if fitness > rt.memoryBudget.float or not result.survived:
+      instance.cleanup()
+      rt.instances.del(hash)
+      rt.executionLog.del(hash)
+    else:
+      totalMemory += result.memoryUsed
+  
+  if totalMemory > rt.memoryBudget:
+    rt.garbageCollect() # Recursively collect until under budget
+
+proc adaptiveCompile*(rt: JeetRuntime, source: string): Future[seq[byte]] {.async.} =
+  # Genetic compilation algorithm that evolves based on runtime metrics
+  let currentBest = rt.executionLog.values.toSeq
+    .filterIt(it.survived)
+    .sortedByIt(-it.fitness)
+  
+  if currentBest.len > 0:
+    return optimizeWasm(currentBest[0].wasmHash, source)
+  else:
+    return defaultCompile(source)
+```
+
+Key integration points with `nim-libp2p`:
+
+1. **Network-Aware Garbage Collection**:
+```nim
+proc networkAwareGC(rt: JeetRuntime, swarm: P2PSwarm) {.async.} =
+  while true:
+    let peerCount = swarm.peers.len
+    let gcThreshold = rt.memoryBudget * (1 + peerCount.float * 0.1)
+    
+    if rt.currentMemoryUsage() > gcThreshold:
+      rt.garbageCollect()
+    
+    await sleepAsync(rt.gcInterval)
+```
+
+2. **Distributed Fitness Function**:
+```nim
+proc calculateFitness*(rt: JeetRuntime, swarm: P2PSwarm): float =
+  let localFitness = rt.executionLog.values
+    .mapIt(it.executionTime.inSeconds / it.memoryUsed.float)
+    .sum()
+  
+  let networkFitness = swarm.peers
+    .mapIt(it.metadata.getOrDefault("fitness", 0.0))
+    .sum()
+  
+  (localFitness + networkFitness) / (swarm.peers.len + 1).float
+```
+
+3. **Capability Negotiation Protocol**:
+```nim
+proc handleCapabilityRequest(conn: Connection, proto: string) {.async.} =
+  let requestedCaps = parseCapabilities(await conn.readLp(1024))
+  let grantedCaps = rt.capabilities * requestedCaps
+  
+  await conn.writeLp(grantedCaps.encode())
+  conn.close()
+```
+
+To use with `nim-libp2p` node:
+
+```nim
+proc setupNode*(node: JITNode) =
+  node.switch.mount:
+    @[
+      Protocol.new("/jit/1.1.0", handleCompileRequest),
+      Protocol.new("/capabilities/1.0", handleCapabilityRequest)
+    ]
+    Identify.new()
+    GossipSub.new()
+  
+  asyncCheck networkAwareGC(node.rt, node.swarm)
+```
+
+This implementation provides:
+
+1. Security features from JavaScript version:
+- Capability-based imports
+- Memory isolation
+- Timeouts
+- Sanitized error reporting
+
+2. jenetic programming additions:
+- Fitness-based garbage collection
+- Network-aware memory budgeting
+- Evolutionary compilation strategies
+- Distributed fitness metrics
+
+3. libp2p integration:
+- Protocol negotiation
+- Network metrics collection
+- Distributed survival strategies
+- Gossip-based code propagation
+
+To test the jenetic system:
+
+```bash
+# Start node with specific capabilities
+nim c -r jit_node.nim --port=3000 --caps=math,io
+
+# Request compilation from another node
+libp2p-client /ip4/127.0.0.1/tcp/3000/p2p/QmPeerId \
+  /jit/1.1.0 "function optimized() { ... }"
+
+# Monitor network fitness
+libp2p-client /ip4/127.0.0.1/tcp/3000/p2p/QmPeerId \
+  /capabilities/1.0 "requested=math,io,network"
+```
+
+The system will automatically:
+- Evolve frequently used code
+- Discard underperforming modules
+- Adapt memory usage based on network conditions
+- Negotiate capabilities between peers
